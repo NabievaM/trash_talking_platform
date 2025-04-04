@@ -28,6 +28,7 @@ export class UserService {
   async getTokens(user: User) {
     const jwtPayload = {
       id: user.id,
+      username: user.username,
       is_active: user.is_active,
       is_admin: user.is_admin,
       is_superAdmin: user.is_superAdmin,
@@ -337,15 +338,5 @@ export class UserService {
     }
 
     return affectedRows[0];
-  }
-
-  async removeImage(id: number) {
-    const user = await this.userRepo.findOne({ where: { id } });
-
-    if (!user) {
-      throw new HttpException('Not found', HttpStatus.NOT_FOUND);
-    }
-
-    return this.fileService.removeFile(user.profile_picture);
   }
 }

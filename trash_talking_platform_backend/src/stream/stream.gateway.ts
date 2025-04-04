@@ -1,199 +1,190 @@
 import {
   WebSocketGateway,
-  SubscribeMessage,
-  MessageBody,
+  WebSocketServer,
   OnGatewayConnection,
   OnGatewayDisconnect,
-  WebSocketServer,
+  ConnectedSocket,
+  MessageBody,
+  SubscribeMessage,
 } from '@nestjs/websockets';
+import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
+import {
+  Injectable,
+  UnauthorizedException,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
+import { User } from '../user/models/user.model';
+import { InjectModel } from '@nestjs/sequelize';
 import { StreamService } from './stream.service';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import * as jwt from 'jsonwebtoken';
-import * as dotenv from 'dotenv';
+import { Follow } from '../follow/models/follow.model';
 
-dotenv.config();
+interface StreamRequest {
+  senderId: string;
+  receiverId: string;
+  accepted?: boolean;
+}
 
 @WebSocketGateway({
   cors: {
     origin: '*',
   },
 })
+@Injectable()
 export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
-  @WebSocketServer() server: Server;
-  private activeStreams = new Map<number, string[]>();
+  @WebSocketServer()
+  server: Server;
 
-  constructor(private readonly streamService: StreamService) {}
+  private streamRequests: StreamRequest[] = [];
+  private activeStreams: Map<string, string[]> = new Map();
 
-  async handleConnection(client: Socket) {
+  constructor(
+    private readonly jwtService: JwtService,
+    @InjectModel(User) private readonly userModel: typeof User,
+    @Inject(forwardRef(() => StreamService))
+    private readonly streamService: StreamService,
+  ) {}
+
+  async handleConnection(@ConnectedSocket() client: Socket) {
     try {
-      const token = client.handshake.auth?.token;
-      if (!token) {
-        throw new ForbiddenException('Token is required');
-      }
+      const token = client.handshake.query.token as string;
+      if (!token) throw new UnauthorizedException('Token required');
 
-      const payload = jwt.verify(token, process.env.ACCESS_TOKEN_KEY) as {
-        id: number;
-        username: string;
-      };
+      const payload = this.jwtService.verify(token, {
+        secret: process.env.ACCESS_TOKEN_KEY,
+      });
 
-      console.log(`User connected: ${payload.username}`);
-      client.data.user = payload;
+      const user = await this.userModel.findByPk(payload.id);
+      if (!user) throw new UnauthorizedException('User not found');
+
+      client.data.user = user;
+      client.join(`user_${user.id}`);
+
+      console.log(`${user.username} connected`);
+
+      this.server.emit('user_connected', { username: user.username });
     } catch (error) {
       console.error('Connection error:', error.message);
       client.disconnect();
     }
   }
 
-  async handleDisconnect(client: Socket) {
-    console.log(`User disconnected: ${client.id}`);
-
-    this.activeStreams.forEach((clients, streamerId) => {
-      const updatedClients = clients.filter((id) => id !== client.id);
-      if (updatedClients.length === 0) {
-        this.activeStreams.delete(streamerId);
-      } else {
-        this.activeStreams.set(streamerId, updatedClients);
-      }
-    });
+  handleDisconnect(@ConnectedSocket() client: Socket) {
+    if (client.data.user) {
+      console.log(`${client.data.user.username} disconnected`);
+      this.server.emit('user_disconnected', {
+        username: client.data.user.username,
+      });
+    }
   }
 
-  @SubscribeMessage('startStream')
-  async handleStartStream(
-    client: Socket,
-    @MessageBody() { streamerId }: { streamerId: number },
+  notifyFollowers(
+    @MessageBody()
+    { streamerId, followerIds }: { streamerId: number; followerIds: number[] },
   ) {
-    try {
-      const user = client.data.user;
-      if (!user || user.id !== streamerId) {
-        throw new ForbiddenException('Unauthorized to start stream');
-      }
-
-      const activeStream = await this.streamService.getActiveStream(
+    followerIds.forEach((followerId) => {
+      this.server.to(`user_${followerId}`).emit('newStream', {
         streamerId,
-        streamerId,
-        true,
-      );
-
-      if (activeStream) {
-        throw new BadRequestException('You already have an active stream.');
-      }
-
-      const newStream = await this.streamService.createStream(streamerId);
-
-      if (!this.activeStreams.has(streamerId)) {
-        this.activeStreams.set(streamerId, []);
-      }
-      this.activeStreams.get(streamerId)?.push(client.id);
-
-      this.server.emit('streamStarted', {
-        streamId: newStream.id,
-        streamerId: newStream.streamer_id,
+        message: 'A new stream is available!',
       });
-
-      return { message: 'Stream started successfully.' };
-    } catch (error) {
-      console.error('Error starting stream:', error);
-      client.emit('error', error.message || 'Server error');
-    }
+    });
   }
 
   @SubscribeMessage('joinStream')
-  async joinStream(
-    client: Socket,
-    @MessageBody() { streamId, userId }: { streamId: number; userId: number },
+  async handleJoinStream(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() { streamId }: { streamId: string },
   ) {
-    try {
-      const stream = await this.streamService.getStreamById(streamId, userId);
-      if (!this.activeStreams.has(streamId)) {
-        this.activeStreams.set(streamId, []);
-      }
+    console.log(`joinStream event triggered with streamId: ${streamId}`);
 
-      this.activeStreams.get(streamId)?.push(client.id);
-      client.join(`stream-${streamId}`);
-      client.emit('joinedStream', { streamId });
-
-      console.log(`User ${userId} joined stream ${streamId}`);
-    } catch (error) {
-      client.emit('error', 'Access denied or stream not found');
-    }
-  }
-
-  @SubscribeMessage('sendMessage')
-  async sendMessage(
-    client: Socket,
-    @MessageBody()
-    { streamId, message }: { streamId: number; message: string },
-  ) {
-    const viewers = this.activeStreams.get(streamId) || [];
-    if (!viewers.includes(client.id)) {
-      throw new ForbiddenException('You are not in this stream');
-    }
-
-    this.server.to(`stream-${streamId}`).emit('newMessage', {
-      userId: client.data.user.id,
-      message,
-      timestamp: new Date(),
-    });
-
-    console.log(`Message in stream ${streamId}: ${message}`);
-  }
-
-  @SubscribeMessage('endStream')
-  async endStream(
-    client: Socket,
-    @MessageBody()
-    { streamerId }: { streamerId: number },
-  ) {
-    try {
-      const user = client.data.user;
-      if (!user || user.id !== streamerId) {
-        throw new ForbiddenException('Unauthorized to end stream');
-      }
-
-      await this.streamService.endStream(streamerId, user.id);
-      const streamId = Array.from(this.activeStreams.keys()).find(
-        (id) => id === streamerId,
-      );
-      if (streamId) {
-        this.server.to(`stream-${streamId}`).emit('streamEnded', { streamId });
-        this.activeStreams.delete(streamId);
-      }
-      console.log(`Stream ended: ${streamId}`);
-    } catch (error) {
-      client.emit('error', 'Cannot end this stream');
-    }
-  }
-
-  @SubscribeMessage('requestToJoin')
-  async requestToJoin(
-    client: Socket,
-    @MessageBody() { streamId }: { streamId: number },
-  ) {
-    const viewers = this.activeStreams.get(streamId) || [];
-    if (!viewers.includes(client.id)) {
-      throw new ForbiddenException('You are not in this stream');
-    }
-
-    this.server.to(`stream-${streamId}`).emit('joinRequest', {
-      userId: client.data.user.id,
-    });
-    console.log(
-      `User ${client.data.user.id} requested to join stream ${streamId}`,
-    );
-  }
-
-  @SubscribeMessage('acceptJoinRequest')
-  async acceptJoinRequest(
-    client: Socket,
-    @MessageBody() { streamId, userId }: { streamId: number; userId: number },
-  ) {
     const user = client.data.user;
+    console.log(`User data:`, user);
+
     if (!user) {
-      throw new ForbiddenException('Unauthorized');
+      console.log(`Unauthorized request from client: ${client.id}`);
+      return client.emit('error', { message: 'Unauthorized' });
     }
 
-    this.server.to(`stream-${streamId}`).emit('requestAccepted', { userId });
-    console.log(`User ${userId} accepted to stream ${streamId}`);
+    const stream = await this.userModel.findByPk(Number(streamId), {
+      attributes: ['id', 'username', 'profile_visibility'],
+      include: [
+        {
+          model: Follow,
+          as: 'followers',
+          attributes: ['follower_id'],
+          where: { status: 'accepted' },
+          required: false,
+        },
+      ],
+    });
+
+    if (!stream) {
+      console.log(`Stream not found: ${streamId}`);
+      return client.emit('error', { message: 'Stream not found' });
+    }
+
+    console.log(`Stream found: ${stream.id}, Owner: ${stream.username}`);
+
+    const isOwner = user.id === stream.id;
+    const isFollower = stream.followers?.some((f) => f.follower_id === user.id);
+
+    if (stream.profile_visibility === 'private' && !isOwner && !isFollower) {
+      console.log(`Access denied for user: ${user.id}`);
+      return client.emit('error', {
+        message: 'Access denied: You are not a follower',
+      });
+    }
+
+    client.join(`stream_${streamId}`);
+    console.log(`${user.username} joined stream ${streamId}`);
+
+    this.server.to(`user_${streamId}`).emit('viewerJoined', {
+      viewerId: user.id,
+      username: user.username,
+    });
+  }
+
+  @SubscribeMessage('sendRequestToJoin')
+  handleSendRequest(@MessageBody() { senderId, receiverId }: StreamRequest) {
+    const request: StreamRequest = { senderId, receiverId };
+    this.streamRequests.push(request);
+    this.server.to(`user_${receiverId}`).emit('joinRequest', request);
+  }
+
+  @SubscribeMessage('acceptRequest')
+  handleAcceptRequest(@MessageBody() { senderId, receiverId }: StreamRequest) {
+    const requestIndex = this.streamRequests.findIndex(
+      (req) => req.senderId === senderId && req.receiverId === receiverId,
+    );
+
+    if (requestIndex !== -1) {
+      this.streamRequests.splice(requestIndex, 1);
+
+      if (this.activeStreams.has(receiverId)) {
+        this.activeStreams.get(receiverId)?.push(senderId);
+      } else {
+        this.activeStreams.set(receiverId, [senderId]);
+      }
+
+      this.server
+        .to(`user_${senderId}`)
+        .emit('requestAccepted', { receiverId });
+      this.server.to(`user_${receiverId}`).emit('userJoined', { senderId });
+    }
+  }
+
+  @SubscribeMessage('rejectRequest')
+  handleRejectRequest(@MessageBody() { senderId, receiverId }: StreamRequest) {
+    this.streamRequests = this.streamRequests.filter(
+      (req) => req.senderId !== senderId || req.receiverId !== receiverId,
+    );
+    this.server.to(`user_${senderId}`).emit('requestRejected', { receiverId });
+  }
+
+  @SubscribeMessage('stopStream')
+  handleStopStream(@MessageBody() { userId }: { userId: string }) {
+    this.activeStreams.delete(userId);
+    this.server.emit('streamStopped', { userId });
   }
 }

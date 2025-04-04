@@ -8,7 +8,7 @@ import { User } from '../user/models/user.model';
 import { Notification } from '../notification/models/notification.model';
 import { NotificationGateway } from '../notification/notification.gateway';
 import { NotificationModule } from '../notification/notification.module';
-import { StreamGateway } from '../stream/stream.gateway';
+// import { StreamGateway } from '../stream/stream.gateway';
 import { StreamModule } from '../stream/stream.module';
 
 @Module({
@@ -19,7 +19,7 @@ import { StreamModule } from '../stream/stream.module';
     forwardRef(() => StreamModule),
   ],
   controllers: [FollowController],
-  providers: [FollowService, NotificationGateway, StreamGateway],
+  providers: [FollowService, NotificationGateway],
   exports: [FollowService],
 })
 export class FollowModule {}

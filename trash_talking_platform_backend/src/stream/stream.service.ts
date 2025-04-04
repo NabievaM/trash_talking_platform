@@ -3,12 +3,15 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/sequelize';
 import { Stream } from './models/stream.model';
 import { User } from '../user/models/user.model';
 import { Follow } from '../follow/models/follow.model';
 import { ProfileVisibility } from '../user/dto/signup-user.dto';
+import { StreamGateway } from './stream.gateway';
 import { Op } from 'sequelize';
 
 @Injectable()
@@ -17,6 +20,8 @@ export class StreamService {
     @InjectModel(Stream) private readonly streamModel: typeof Stream,
     @InjectModel(User) private readonly userModel: typeof User,
     @InjectModel(Follow) private readonly followModel: typeof Follow,
+    @Inject(forwardRef(() => StreamGateway))
+    private readonly streamGateway: StreamGateway,
   ) {}
 
   async createStream(streamerId: number): Promise<Stream> {
@@ -28,10 +33,34 @@ export class StreamService {
       throw new BadRequestException('You already have an active stream.');
     }
 
-    return this.streamModel.create({
+    const streamer = await this.userModel.findByPk(streamerId);
+    if (!streamer) {
+      throw new NotFoundException('Streamer not found');
+    }
+
+    const stream = await this.streamModel.create({
       streamer_id: streamerId,
       is_active: true,
     });
+
+    const followers = await this.followModel.findAll({
+      where: {
+        following_id: streamerId,
+        status: 'accepted',
+      },
+      include: [{ model: User, as: 'follower' }],
+    });
+
+    this.notifyFollowers(
+      streamerId,
+      followers.map((f) => f.follower.id),
+    );
+
+    return stream;
+  }
+
+  private notifyFollowers(streamerId: number, followerIds: number[]): void {
+    this.streamGateway.notifyFollowers({ streamerId, followerIds });
   }
 
   async getActiveStream(
