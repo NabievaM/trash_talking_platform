@@ -56,6 +56,18 @@ export class PostController {
     return this.postService.findAll(req.user.id, isAdmin);
   }
 
+  @ApiOperation({ summary: "User's own posts" })
+  @ApiResponse({
+    status: 200,
+    description: "List of posts created by the authenticated user",
+    type: [Posts],
+  })
+  @Get('me/posts')
+  @UseGuards(UserGuard)
+  async myPosts(@Request() req): Promise<Posts[]> {
+    return this.postService.myPosts(req.user.id);
+  }
+
   @ApiOperation({ summary: 'Search post' })
   @Get('search')
   @UseGuards(UserGuard)

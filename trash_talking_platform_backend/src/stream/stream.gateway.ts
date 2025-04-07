@@ -136,13 +136,44 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
       });
     }
 
+    // Qo'shish: Eventni tinglash yoki boshqa ishlov berish
     client.join(`stream_${streamId}`);
     console.log(`${user.username} joined stream ${streamId}`);
 
+    // Bu yerda boshqa foydalanuvchiga xabar yuborish
     this.server.to(`user_${streamId}`).emit('viewerJoined', {
       viewerId: user.id,
       username: user.username,
     });
+
+    // Eventni o'zidan javob yuborish
+    client.emit('streamJoined', { streamId, username: user.username });
+  }
+
+  @SubscribeMessage('leaveStream')
+  handleLeaveStream(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() { streamId }: { streamId: string },
+  ) {
+    const user = client.data.user;
+    if (!user) return client.emit('error', { message: 'Unauthorized' });
+
+    client.leave(`stream_${streamId}`);
+
+    // Stream egasining aktiv ro‘yxatidan ushbu userni olib tashlash
+    const viewers = this.activeStreams.get(streamId);
+    if (viewers) {
+      const updatedViewers = viewers.filter((id) => id !== user.id.toString());
+      this.activeStreams.set(streamId, updatedViewers);
+    }
+
+    // Boshqalarga xabar berish
+    this.server.to(`user_${streamId}`).emit('viewerLeft', {
+      viewerId: user.id,
+      username: user.username,
+    });
+
+    client.emit('streamLeft', { streamId });
   }
 
   @SubscribeMessage('sendRequestToJoin')

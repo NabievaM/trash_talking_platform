@@ -4,6 +4,7 @@ import {
   Injectable,
   Inject,
   forwardRef,
+  NotFoundException,
 } from '@nestjs/common';
 import { CreatePostDto } from './dto/create-post.dto';
 import { UpdatePostDto } from './dto/update-post.dto';
@@ -103,6 +104,18 @@ export class PostService {
         return true;
       return false;
     });
+  }
+
+  async myPosts(userId: number): Promise<Posts[]> {
+    const posts = await this.PostRepository.findAll({
+      where: { user_id: userId },
+    });
+
+    if (!posts || posts.length === 0) {
+      throw new NotFoundException("You haven't created any posts yet.");
+    }
+
+    return posts;
   }
 
   async GetById(id: number, userId: number): Promise<Posts> {
