@@ -84,27 +84,60 @@ export class PostService {
     return post;
   }
 
-  async findAll(userId: number, isAdmin: boolean): Promise<Posts[]> {
+  async findAll(userId: number, isAdmin: boolean): Promise<any[]> {
     const posts = await this.PostRepository.findAll({
       include: [
-        { association: 'user', include: [{ association: 'followers' }] },
+        {
+          association: 'user',
+          attributes: [
+            'id',
+            'username',
+            'profile_picture',
+            'profile_visibility',
+          ],
+          include: [{ association: 'followers' }],
+        },
+        {
+          association: 'comments',
+          include: [
+            {
+              association: 'user',
+              attributes: ['id', 'username', 'profile_picture'],
+            },
+          ],
+        },
+        {
+          association: 'likes',
+          include: [
+            {
+              association: 'user',
+              attributes: ['id', 'username'],
+            },
+          ],
+        },
       ],
     });
 
-    return posts.filter((post) => {
-      if (!post.user) return false;
-      if (isAdmin) return true;
-      if (post.user.profile_visibility === 'public') return true;
-      if (post.user_id === userId) return true;
-      if (
-        post.user.followers?.some(
-          (sub) => sub.follower_id === userId && sub.status === 'accepted',
+    return posts
+      .filter((post) => {
+        if (!post.user) return false;
+        if (isAdmin) return true;
+        if (post.user.profile_visibility === 'public') return true;
+        if (post.user_id === userId) return true;
+        if (
+          post.user.followers?.some(
+            (sub) => sub.follower_id === userId && sub.status === 'accepted',
+          )
         )
-      )
-        return true;
-      return false;
-    });
-  }
+          return true;
+        return false;
+      })
+      .map((post) => ({
+        ...post.toJSON(),
+        commentsCount: post.comments?.length || 0,
+        likesCount: post.likes?.length || 0,
+      }));
+  } 
 
   async myPosts(userId: number): Promise<Posts[]> {
     const posts = await this.PostRepository.findAll({

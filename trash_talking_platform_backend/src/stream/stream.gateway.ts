@@ -62,7 +62,6 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.join(`user_${user.id}`);
 
       console.log(`${user.username} connected`);
-
       this.server.emit('user_connected', { username: user.username });
     } catch (error) {
       console.error('Connection error:', error.message);
@@ -77,6 +76,36 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
         username: client.data.user.username,
       });
     }
+  }
+
+  @SubscribeMessage('startStream')
+  handleStartStream(@ConnectedSocket() client: Socket) {
+    const user = client.data.user;
+    if (!user) {
+      return client.emit('error', { message: 'Unauthorized' });
+    }
+
+    const userId = user.id.toString();
+
+    if (this.activeStreams.has(userId)) {
+      return client.emit('error', { message: 'Stream already active' });
+    }
+
+    this.activeStreams.set(userId, []);
+    client.join(`stream_${userId}`);
+
+    console.log(`${user.username} started stream`);
+
+    this.server.emit('streamStarted', {
+      userId,
+      username: user.username,
+      message: 'Live stream started!',
+    });
+
+    client.emit('streamStartedConfirmation', {
+      userId,
+      message: 'Your stream has started',
+    });
   }
 
   notifyFollowers(
@@ -96,13 +125,8 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() { streamId }: { streamId: string },
   ) {
-    console.log(`joinStream event triggered with streamId: ${streamId}`);
-
     const user = client.data.user;
-    console.log(`User data:`, user);
-
     if (!user) {
-      console.log(`Unauthorized request from client: ${client.id}`);
       return client.emit('error', { message: 'Unauthorized' });
     }
 
@@ -120,33 +144,32 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
 
     if (!stream) {
-      console.log(`Stream not found: ${streamId}`);
       return client.emit('error', { message: 'Stream not found' });
     }
-
-    console.log(`Stream found: ${stream.id}, Owner: ${stream.username}`);
 
     const isOwner = user.id === stream.id;
     const isFollower = stream.followers?.some((f) => f.follower_id === user.id);
 
     if (stream.profile_visibility === 'private' && !isOwner && !isFollower) {
-      console.log(`Access denied for user: ${user.id}`);
       return client.emit('error', {
         message: 'Access denied: You are not a follower',
       });
     }
 
-    // Qo'shish: Eventni tinglash yoki boshqa ishlov berish
     client.join(`stream_${streamId}`);
-    console.log(`${user.username} joined stream ${streamId}`);
 
-    // Bu yerda boshqa foydalanuvchiga xabar yuborish
+    // Foydalanuvchini aktivlar ro'yxatiga qo'shish
+    const viewers = this.activeStreams.get(streamId) || [];
+    if (!viewers.includes(user.id.toString())) {
+      viewers.push(user.id.toString());
+      this.activeStreams.set(streamId, viewers);
+    }
+
     this.server.to(`user_${streamId}`).emit('viewerJoined', {
       viewerId: user.id,
       username: user.username,
     });
 
-    // Eventni o'zidan javob yuborish
     client.emit('streamJoined', { streamId, username: user.username });
   }
 
@@ -160,14 +183,12 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     client.leave(`stream_${streamId}`);
 
-    // Stream egasining aktiv ro‘yxatidan ushbu userni olib tashlash
     const viewers = this.activeStreams.get(streamId);
     if (viewers) {
       const updatedViewers = viewers.filter((id) => id !== user.id.toString());
       this.activeStreams.set(streamId, updatedViewers);
     }
 
-    // Boshqalarga xabar berish
     this.server.to(`user_${streamId}`).emit('viewerLeft', {
       viewerId: user.id,
       username: user.username,
