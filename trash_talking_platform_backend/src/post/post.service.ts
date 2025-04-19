@@ -115,6 +115,10 @@ export class PostService {
             },
           ],
         },
+        {
+          association: 'category',
+          attributes: ['id', 'name'],
+        },
       ],
     });
 
@@ -137,7 +141,7 @@ export class PostService {
         commentsCount: post.comments?.length || 0,
         likesCount: post.likes?.length || 0,
       }));
-  } 
+  }
 
   async myPosts(userId: number): Promise<Posts[]> {
     const posts = await this.PostRepository.findAll({

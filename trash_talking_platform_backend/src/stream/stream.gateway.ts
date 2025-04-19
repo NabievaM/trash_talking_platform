@@ -78,34 +78,19 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+
   @SubscribeMessage('startStream')
-  handleStartStream(@ConnectedSocket() client: Socket) {
-    const user = client.data.user;
-    if (!user) {
-      return client.emit('error', { message: 'Unauthorized' });
+  async handleStartStream(
+    @MessageBody() data: { userId: number },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const stream = await this.streamService.createStream(data.userId);
+
+      client.emit('streamStarted', { stream });
+    } catch (err) {
+      client.emit('error', { message: err.message });
     }
-
-    const userId = user.id.toString();
-
-    if (this.activeStreams.has(userId)) {
-      return client.emit('error', { message: 'Stream already active' });
-    }
-
-    this.activeStreams.set(userId, []);
-    client.join(`stream_${userId}`);
-
-    console.log(`${user.username} started stream`);
-
-    this.server.emit('streamStarted', {
-      userId,
-      username: user.username,
-      message: 'Live stream started!',
-    });
-
-    client.emit('streamStartedConfirmation', {
-      userId,
-      message: 'Your stream has started',
-    });
   }
 
   notifyFollowers(

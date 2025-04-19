@@ -34,6 +34,8 @@ import { NotificationReadersModule } from './notification-readers/notification-r
 import { NotificationReader } from './notification-readers/models/notification-reader.model';
 import { StreamModule } from './stream/stream.module';
 import { Stream } from './stream/models/stream.model';
+import { CategoryModule } from './category/category.module';
+import { Category } from './category/models/category.model';
 
 @Module({
   imports: [
@@ -67,6 +69,7 @@ import { Stream } from './stream/models/stream.model';
         Notification,
         NotificationReader,
         Stream,
+        Category
       ],
       autoLoadModels: true,
       logging: false,
@@ -87,6 +90,7 @@ import { Stream } from './stream/models/stream.model';
     NotificationModule,
     NotificationReadersModule,
     StreamModule,
+    CategoryModule,
   ],
   controllers: [],
   providers: [],

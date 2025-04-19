@@ -11,12 +11,14 @@ import {
 import { User } from '../../user/models/user.model';
 import { Comment } from '../../comment/models/comment.model';
 import { Like } from '../../like/models/like.model';
+import { Category } from '../../category/models/category.model';
 
 interface PostAttrs {
   title: string;
   content: string;
   image?: string;
   user_id: number;
+  category_id: number;
 }
 
 @Table({ tableName: 'Posts' })
@@ -60,6 +62,13 @@ export class Posts extends Model<Posts, PostAttrs> {
 
   @BelongsTo(() => User)
   user: User;
+
+  @ForeignKey(() => Category)
+  @Column({ type: DataType.INTEGER, allowNull: false })
+  category_id: number;
+
+  @BelongsTo(() => Category)
+  category: Category;
 
   @HasMany(() => Comment)
   comments: Comment[];
