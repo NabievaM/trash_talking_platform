@@ -19,11 +19,11 @@ import { User } from '../user/models/user.model';
 import { InjectModel } from '@nestjs/sequelize';
 import { StreamService } from './stream.service';
 import { Follow } from '../follow/models/follow.model';
+import { FollowService } from '../follow/follow.service';
 
 interface StreamRequest {
   senderId: string;
   receiverId: string;
-  accepted?: boolean;
 }
 
 @WebSocketGateway({
@@ -37,13 +37,15 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
   server: Server;
 
   private streamRequests: StreamRequest[] = [];
-  private activeStreams: Map<string, string[]> = new Map();
+  private activeStreams: Map<string, Set<string>> = new Map();
+  private userSockets: Map<number, string> = new Map();
 
   constructor(
     private readonly jwtService: JwtService,
     @InjectModel(User) private readonly userModel: typeof User,
     @Inject(forwardRef(() => StreamService))
     private readonly streamService: StreamService,
+    private readonly followService: FollowService,
   ) {}
 
   async handleConnection(@ConnectedSocket() client: Socket) {
@@ -60,24 +62,86 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       client.data.user = user;
       client.join(`user_${user.id}`);
+      this.userSockets.set(user.id, client.id);
 
       console.log(`${user.username} connected`);
-      this.server.emit('user_connected', { username: user.username });
+      this.server.emit('user_connected', {
+        userId: user.id,
+        username: user.username,
+      });
     } catch (error) {
       console.error('Connection error:', error.message);
       client.disconnect();
     }
   }
 
-  handleDisconnect(@ConnectedSocket() client: Socket) {
-    if (client.data.user) {
-      console.log(`${client.data.user.username} disconnected`);
-      this.server.emit('user_disconnected', {
-        username: client.data.user.username,
-      });
-    }
+  async handleDisconnect(@ConnectedSocket() client: Socket) {
+    const user = client.data.user;
+    if (!user) return;
+
+    console.log(`${user.username} disconnected`);
+    this.userSockets.delete(user.id);
+
+    this.activeStreams.forEach((viewers, streamId) => {
+      if (viewers.has(user.id.toString())) {
+        viewers.delete(user.id.toString());
+        this.server.to(`stream_${streamId}`).emit('viewerLeft', {
+          viewerId: user.id,
+          username: user.username,
+        });
+      }
+    });
+
+    this.server.emit('user_disconnected', {
+      userId: user.id,
+      username: user.username,
+    });
   }
 
+  @SubscribeMessage('offer')
+  handleOffer(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: { targetUserId: number; offer: RTCSessionDescriptionInit },
+  ) {
+    const sender = client.data.user;
+    if (!sender) return;
+
+    this.server.to(`user_${data.targetUserId}`).emit('offer', {
+      senderId: sender.id,
+      offer: data.offer,
+    });
+  }
+
+  @SubscribeMessage('answer')
+  handleAnswer(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: { targetUserId: number; answer: RTCSessionDescriptionInit },
+  ) {
+    const sender = client.data.user;
+    if (!sender) return;
+
+    this.server.to(`user_${data.targetUserId}`).emit('answer', {
+      senderId: sender.id,
+      answer: data.answer,
+    });
+  }
+
+  @SubscribeMessage('ice-candidate')
+  handleIceCandidate(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: { targetUserId: number; candidate: RTCIceCandidate },
+  ) {
+    const sender = client.data.user;
+    if (!sender) return;
+
+    this.server.to(`user_${data.targetUserId}`).emit('ice-candidate', {
+      senderId: sender.id,
+      candidate: data.candidate,
+    });
+  }
 
   @SubscribeMessage('startStream')
   async handleStartStream(
@@ -86,21 +150,23 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     try {
       const stream = await this.streamService.createStream(data.userId);
-
+      this.activeStreams.set(data.userId.toString(), new Set());
       client.emit('streamStarted', { stream });
+
+      const followers = await this.followService.getFollowerIds(data.userId);
+      this.notifyFollowers({
+        streamerId: data.userId,
+        followerIds: followers,
+      });
     } catch (err) {
       client.emit('error', { message: err.message });
     }
   }
 
-  notifyFollowers(
-    @MessageBody()
-    { streamerId, followerIds }: { streamerId: number; followerIds: number[] },
-  ) {
-    followerIds.forEach((followerId) => {
-      this.server.to(`user_${followerId}`).emit('newStream', {
-        streamerId,
-        message: 'A new stream is available!',
+  notifyFollowers(data: { streamerId: number; followerIds: number[] }) {
+    data.followerIds.forEach((followerId) => {
+      this.server.to(`user_${followerId}`).emit('stream-started', {
+        streamerId: data.streamerId,
       });
     });
   }
@@ -111,11 +177,9 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() { streamId }: { streamId: string },
   ) {
     const user = client.data.user;
-    if (!user) {
-      return client.emit('error', { message: 'Unauthorized' });
-    }
+    if (!user) return client.emit('error', { message: 'Unauthorized' });
 
-    const stream = await this.userModel.findByPk(Number(streamId), {
+    const streamUser = await this.userModel.findByPk(Number(streamId), {
       attributes: ['id', 'username', 'profile_visibility'],
       include: [
         {
@@ -128,27 +192,27 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
       ],
     });
 
-    if (!stream) {
+    if (!streamUser)
       return client.emit('error', { message: 'Stream not found' });
-    }
 
-    const isOwner = user.id === stream.id;
-    const isFollower = stream.followers?.some((f) => f.follower_id === user.id);
+    const isOwner = user.id === streamUser.id;
+    const isFollower = streamUser.followers?.some(
+      (f) => f.follower_id === user.id,
+    );
 
-    if (stream.profile_visibility === 'private' && !isOwner && !isFollower) {
-      return client.emit('error', {
-        message: 'Access denied: You are not a follower',
-      });
+    if (
+      streamUser.profile_visibility === 'private' &&
+      !isOwner &&
+      !isFollower
+    ) {
+      return client.emit('error', { message: 'Access denied' });
     }
 
     client.join(`stream_${streamId}`);
 
-    // Foydalanuvchini aktivlar ro'yxatiga qo'shish
-    const viewers = this.activeStreams.get(streamId) || [];
-    if (!viewers.includes(user.id.toString())) {
-      viewers.push(user.id.toString());
-      this.activeStreams.set(streamId, viewers);
-    }
+    const viewers = this.activeStreams.get(streamId) || new Set();
+    viewers.add(user.id.toString());
+    this.activeStreams.set(streamId, viewers);
 
     this.server.to(`user_${streamId}`).emit('viewerJoined', {
       viewerId: user.id,
@@ -170,8 +234,7 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     const viewers = this.activeStreams.get(streamId);
     if (viewers) {
-      const updatedViewers = viewers.filter((id) => id !== user.id.toString());
-      this.activeStreams.set(streamId, updatedViewers);
+      viewers.delete(user.id.toString());
     }
 
     this.server.to(`user_${streamId}`).emit('viewerLeft', {
@@ -184,31 +247,22 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage('sendRequestToJoin')
   handleSendRequest(@MessageBody() { senderId, receiverId }: StreamRequest) {
-    const request: StreamRequest = { senderId, receiverId };
-    this.streamRequests.push(request);
-    this.server.to(`user_${receiverId}`).emit('joinRequest', request);
+    this.streamRequests.push({ senderId, receiverId });
+    this.server.to(`user_${receiverId}`).emit('joinRequest', { senderId });
   }
 
   @SubscribeMessage('acceptRequest')
   handleAcceptRequest(@MessageBody() { senderId, receiverId }: StreamRequest) {
-    const requestIndex = this.streamRequests.findIndex(
-      (req) => req.senderId === senderId && req.receiverId === receiverId,
+    this.streamRequests = this.streamRequests.filter(
+      (req) => req.senderId !== senderId || req.receiverId !== receiverId,
     );
 
-    if (requestIndex !== -1) {
-      this.streamRequests.splice(requestIndex, 1);
+    const viewers = this.activeStreams.get(receiverId) || new Set();
+    viewers.add(senderId);
+    this.activeStreams.set(receiverId, viewers);
 
-      if (this.activeStreams.has(receiverId)) {
-        this.activeStreams.get(receiverId)?.push(senderId);
-      } else {
-        this.activeStreams.set(receiverId, [senderId]);
-      }
-
-      this.server
-        .to(`user_${senderId}`)
-        .emit('requestAccepted', { receiverId });
-      this.server.to(`user_${receiverId}`).emit('userJoined', { senderId });
-    }
+    this.server.to(`user_${senderId}`).emit('requestAccepted', { receiverId });
+    this.server.to(`user_${receiverId}`).emit('userJoined', { senderId });
   }
 
   @SubscribeMessage('rejectRequest')

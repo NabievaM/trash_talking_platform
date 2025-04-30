@@ -174,6 +174,15 @@ export class FollowService {
     });
   }
 
+  async getFollowerIds(userId: number): Promise<number[]> {
+    const followers = await this.followModel.findAll({
+      where: { following_id: userId, status: 'accepted' },
+      attributes: ['follower_id'],
+    });
+    return followers.map(f => f.follower_id);
+  }
+  
+
   async getFollowing(targetUserId: number, requesterId: number) {
     const targetUser = await this.userModel.findByPk(targetUserId);
     if (!targetUser) {
